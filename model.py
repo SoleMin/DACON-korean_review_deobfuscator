@@ -11,6 +11,16 @@ import torch.nn.functional as F
 
 from data_preprocessing import N_CHO, N_JUNG, N_JONG, PAD
 
+class SwiGLU(nn.Module):
+    def __init__(self, d_model, d_hidden, dropout):
+        super().__init__()
+        self.w1 = nn.Linear(d_model, d_hidden, bias=False)  # gate
+        self.w2 = nn.Linear(d_model, d_hidden, bias=False)  # value
+        self.w3 = nn.Linear(d_hidden, d_model, bias=False)  # down
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        return self.w3(self.dropout(F.silu(self.w1(x)) * self.w2(x)))
 
 class JamoEmbedding(nn.Module):
     def __init__(self, n_chars, d_model, dropout):
@@ -55,9 +65,16 @@ class EncoderBlock(nn.Module):
         self.qkv = nn.Linear(d_model, 3 * d_model)
         self.out_proj = nn.Linear(d_model, d_model)
         self.ff_norm = nn.LayerNorm(d_model)
-        self.ff = nn.Sequential(
-            nn.Linear(d_model, d_ff), nn.GELU(), nn.Dropout(dropout), nn.Linear(d_ff, d_model)
-        )
+        d_hidden = int(2 * d_ff / 3)          # 1024 → 682, 기존 GELU FFN과 파라미터 동급
+        d_hidden = (d_hidden + 63) // 64 * 64  # 704, 텐서코어 정렬
+        # self.ff = nn.Sequential(
+            
+        #     # nn.Linear(d_model, d_ff), nn.GELU(), nn.Dropout(dropout), nn.Linear(d_ff, d_model)
+        #     nn.Linear(d_model, d_ff), SwiGLU(d_model, d_hidden, dropout), nn.Dropout(dropout), nn.Linear(d_ff, d_model)
+        # )
+        d_hidden = int(2 * d_ff / 3)
+        d_hidden = (d_hidden + 63) // 64 * 64  # 704
+        self.ff = SwiGLU(d_model, d_hidden, dropout)
         self.dropout = nn.Dropout(dropout)
         self.attn_dropout = dropout
 
