@@ -8,6 +8,7 @@
 - **현재 최고 구성**: 1단계 복원 모델(5조각 학습) → 2단계 교정 모델 3개의 가중 앙상블
   (KcELECTRA 1개 가중치 2 + KoCharELECTRA 2개 가중치 각 1, 모두 가리기 학습) → 교정 3회 반복 적용
 - **리더보드**: **0.98846** (KcELECTRA 단독 반복 적용은 0.9870, 1회 적용은 0.9863, 이전 KoCharELECTRA 2단계는 0.98473)
+- **최종 제출 최고점**: **0.989**. 위 구성과 다른 앙상블들의 제출 파일을 글자별 다수결로 합친 결과다 (9번의 "마감 직전 시도" 참고)
 - **검증 char F1**: 교정 전 0.9832 → 교정 후 **0.9901** (검증 1,126문장)
 - **한글 글자 오류율**: 2.63% → **1.49%** (오류의 약 43% 감소)
 - **제출 파일**: `outputs_double_ens_w211/submission.csv`
@@ -32,7 +33,7 @@ train.csv ──▶ [1단계] 5조각 학습 ──▶ stage1_oof.csv      (trai
                                                                               │
 stage1_oof.csv + stage1_oof_aug.csv ──▶ [2단계] 교정 모델 학습 ◀───────────────┘
                                               │
-stage1_test.csv ──────────────────────────────┴──▶ outputs_double_aug/submission.csv
+stage1_test.csv ──────────────────────────────┴──▶ 교정된 복원문
 ```
 
 핵심 아이디어는 두 가지다.
@@ -115,7 +116,7 @@ stage1_test.csv ─────────────────────�
 새로 난독화한 문장에 대한 1단계 F1은 약 0.974로, 실제 난독화(0.983)보다 낮다.
 합성 난독화가 실제보다 조금 더 어렵다는 뜻이지만, 학습 예시로는 효과가 있었다.
 
-## 5. 2단계: 교정 모델 (`double_model.py`, `double_train.py`)
+## 5. 2단계: 처음 만든 교정 모델 (KoCharELECTRA, 지금은 삭제)
 
 ### 모델 (약 9,500만 파라미터)
 
@@ -162,38 +163,57 @@ stage1_test.csv ─────────────────────�
 - 마지막 행의 학습 로그는 노트북에 저장되지 않아 최고 epoch와 선택된 `copy_margin` 값은 기록이 없다.
   수치는 `outputs_double_aug/val_predictions.csv`를 직접 집계한 것이다.
 
-## 7. 실행 명령 (재현 순서)
+## 7. 실행 명령
+
+저장소에는 최종 구성(5조각 1단계 → 추가 예측문 → KcELECTRA 2단계 → 반복 적용)의 코드만 남겼다.
+이 구성 그대로의 리더보드 점수는 0.9870이다. 리더보드 최고점(0.98846, 다수결 0.989)은 여기에 KoCharELECTRA
+2단계 모델을 섞은 결과인데, 그 코드와 실험용 스크립트는 정리하면서 지웠다 (git 기록에는 남아 있다).
 
 ```bash
-# 1) 1단계 5조각 학습 + train/test 예측문 생성 (약 2시간)
-python double_stage1.py --seed 44 --n_layers 6 --n_pretrained_layers 6 \
-    --d_ff 1024 --dropout 0.15 --aug_times 2 --lr 3e-4 --valid_ratio 0.03 \
-    --epochs 50 --patience 7
+# 1) 1단계 5조각 학습 + train/test 예측문 생성
+python double_stage1.py --seed 44
 
 # 2) 추가 예측문 생성 (예측만 수행)
-python double_augment.py --n_variants 6
+python double_augment.py
 
-# 3) 2단계 학습 + 검증 + 제출 파일 생성
-python double_train.py --seed 44 --extra_oof_path outputs_double/stage1_oof_aug.csv \
-    --ckpt_path checkpoints/double_stage2_aug.pt --output_dir outputs_double_aug
+# 3) 2단계 교정 모델 학습
+python double_train.py --seed 44 --extra_oof_path outputs_double/stage1_oof_aug.csv
+
+# 4) 교정 반복 적용 -> 최종 제출 파일 (outputs_double_final/submission.csv)
+python double_ensemble.py --ckpt_paths checkpoints/double_stage2.pt
 ```
 
+- 기본값이 실험에 쓴 설정이다 (1단계: 하위 6층 + 사전학습 6층, dropout 0.15, `aug_times 2`. 추가 예측문: `n_variants 6`).
 - 1)은 조각이 끝날 때마다 저장하므로, 끊기면 같은 명령을 다시 실행해 이어서 할 수 있다.
-- 3)의 `--seed 44`는 검증 문장을 고정하기 위한 것이다. 바꾸면 위 표의 수치와 비교할 수 없다.
+- 2단계의 기본값은 A100 기준이다 (`--max_tokens 32768 --lr 2e-4 --ema_decay 0.96`). 메모리가 작으면 낮춘다.
+- 3)의 `--seed`는 검증 문장을 고정한다. 2단계 모델을 여러 개 앙상블하려면 `--seed`는 같게 두고
+  `--model_seed`와 `--ckpt_path`만 바꿔 학습한 뒤, 4)의 `--ckpt_paths`에 함께 넣는다.
 - 2단계만 다시 평가하려면 3)에 `--eval_only`를 붙인다.
 
-## 8. 파일 위치
+## 8. 파일 구성
 
-| 구분 | 경로 |
+| 파일 | 역할 |
 |---|---|
-| 1단계 모델 (조각별) | `checkpoints/double_stage1_fold0~4.pt` |
-| 2단계 모델 (최고) | `checkpoints/double_stage2_aug.pt` |
-| 1단계 train 예측문 | `outputs_double/stage1_oof.csv` |
-| 추가 예측문 | `outputs_double/stage1_oof_aug.csv` |
-| 1단계 test 예측문 | `outputs_double/stage1_test.csv` |
-| 1단계만의 제출 파일 (비교용) | `outputs_double/stage1_submission.csv` |
-| **최종 제출 파일** | `outputs_double_aug/submission.csv` |
-| 검증 예측 (1단계/2단계 나란히) | `outputs_double_aug/val_predictions.csv` |
+| `data_preprocessing.py` | CSV 입출력, 자모 분해, 사전, 데이터셋, 토큰 예산 배치 |
+| `data_augmentation.py` | 증강: 부분 복원, 단어 사전 치환, 재난독화(`Obfuscator`), 이어 붙이기 |
+| `training.py` | 공용 학습 루프(warmup + cosine, fp16, EMA, 조기 종료), seed, 문자 F1 |
+| `model.py` | 1단계 복원 모델 (자모 임베딩 + RoPE Transformer + KoCharELECTRA-small 상위 층) |
+| `double_stage1.py` | 1단계 5조각 학습, train/test 예측문 생성 |
+| `double_augment.py` | 조각별 1단계 모델로 추가 예측문 생성 |
+| `double_data.py` | 2단계 데이터셋 (구간 나누기, 가리기/오답으로 바꾸기, 서브워드-글자 대응) |
+| `double_model.py` | 2단계 교정 모델 (KcELECTRA + 글자 단위 층) |
+| `double_train.py` | 2단계 학습/평가/추론 |
+| `double_ensemble.py` | 교정 반복 적용과 2단계 모델 앙상블, 최종 제출 파일 생성 |
+
+이 문서의 3~6번과 9번에는 정리 전의 스크립트 이름이 나온다. 지금 코드와의 대응은 다음과 같다.
+
+| 문서에 나오는 이름 | 지금 |
+|---|---|
+| `pretrain_model.py` (하이브리드 모델) | `model.py`의 `Stage1Model` |
+| `double_kc_model.py`, `double_kc_train.py` | `double_model.py`, `double_train.py` |
+| `double_mask_train.py`, `double_seed_train.py` | `double_train.py`의 가리기 옵션과 `--model_seed` |
+| `train.py`, `augmented_train.py`, `pretrain_train.py` | 삭제 (단독 학습 스크립트) |
+| KoCharELECTRA 2단계 모델, `double_mask_stage1.py` | 삭제 |
 
 ## 9. 여기까지 오는 과정
 
@@ -245,7 +265,7 @@ python double_train.py --seed 44 --extra_oof_path outputs_double/stage1_oof_aug.
 
 - 효과 확인용 단일 모델(학습 10,137문장, A100 설정)의 검증 F1이 0.9861로, 같은 검증 문장에서 기존 1단계(0.9832)보다 높다.
 - 가리기를 끈 기준 실행은 끝까지 기록되지 않아, 이 차이 중 가리기의 몫은 분리하지 못했다.
-- 5조각 전체 재실행(`--mode folds`) 결과, 2단계 검증 문장 기준 교정 전 F1이 0.9832에서 0.9847로 올랐다 (`checkpoints_mask1/`, `outputs_double_mask1/`).
+- 5조각 전체 재실행 결과, 2단계 검증 문장 기준 교정 전 F1이 0.9832에서 0.9847로 올랐다 (`checkpoints_mask1/`, `outputs_double_mask1/`).
 - 그러나 그 위에 2단계를 다시 학습해 앙상블한 결과는 검증에서만 높고 리더보드에서는 기존 1단계보다 낮았다.
 
 | 구성 (모두 3회 반복 적용) | 1단계 | 검증 char F1 | 리더보드 |
@@ -257,7 +277,22 @@ python double_train.py --seed 44 --extra_oof_path outputs_double/stage1_oof_aug.
 - 새 1단계가 고치게 된 글자는 2단계가 원래 고치던 글자와 대부분 겹쳤다. KcELECTRA 단독의 교정 후 점수는 0.9884~0.9890으로 기존(0.9886)과 같은 수준이었다.
 - 검증 순위와 리더보드 순위가 어긋난 것은 이번이 처음이다. 새 1단계의 test 예측이 기존보다 나쁜 것으로 보이지만 원인은 확인하지 못했다.
   새 1단계는 자모 가리기와 함께 배치 설정(`--max_tokens 65536`)도 바뀌었으므로, 어느 쪽 영향인지 구분되지 않는다.
-- 결론적으로 리더보드 최고는 기존 1단계 기준의 0.98846이다.
+- 결론적으로 단일 파이프라인의 리더보드 최고는 기존 1단계 기준이다.
+
+### 마감 직전 시도 (모두 학습 없이 예측만 수행)
+
+| 구성 | 1단계 | 검증 char F1 | 리더보드 |
+|---|---|---|---|
+| Y: KcELECTRA 5개(기존 1 + 새 4) + KoCharELECTRA 3개, 가중치 2 1 1 1 1 1 1 1 | 기존 | 0.9910 | 0.9888 |
+| C: 새 KcELECTRA 2개 + 기존 KoCharELECTRA 2개 | 자모 가리기 | 0.9908 | 미제출 |
+| **제출 파일 다수결**: Y + 가중 앙상블(0.98846) + B + C (동률이면 Y) | 혼합 | 0.9913 (추정) | **0.989** |
+| Y에서 구간 겹침을 128자에서 255자로 늘림 | 기존 | 0.9910 | 미제출 |
+
+- Y는 새 1단계의 실수로 학습한 KcELECTRA 모델들을 기존 1단계 예측 위에 얹은 것이다. 검증은 0.09%p 올랐지만 리더보드는 0.03%p만 올랐다.
+- 다수결은 기존 1단계 계열과 새 1단계 계열이 틀리는 자리가 다르다는 점을 이용했다 (두 계열이 함께 틀리는 글자는 각자 오류의 약 70%).
+  투표자를 더 늘려도 검증 오류 글자 수는 958~972개에서 더 줄지 않았다.
+- 구간 겹침을 늘린 버전은 test에서 Y와 93자(전체의 0.03%)만 달랐다. 긴 문장의 구간 경계가 오류의 원인이라는 가설은 맞지 않았다.
+- 최종 최고점은 0.989로, 목표였던 0.99에는 0.1%p 못 미쳤다.
 
 ## 10. 알아둘 점과 한계
 
@@ -276,7 +311,7 @@ python double_train.py --seed 44 --extra_oof_path outputs_double/stage1_oof_aug.
 | 순서 | 내용 | 상태 |
 |---|---|---|
 | 1 | 앙상블 구성 넓히기 (반복 5회, 모델 4개, 가중치 조합) | 3개 모델 가중 앙상블은 완료 (리더보드 0.98846) |
-| 2 | KcELECTRA를 seed만 바꿔 더 학습 (`double_seed_train.py --trainer kc`) | 미실행 |
+| 2 | KcELECTRA를 seed만 바꿔 더 학습 (`double_train.py --model_seed N`) | 미실행 |
 | 3 | 1단계 자모 가리기 5조각 → 추가 예측문 → KcELECTRA 2단계 재학습 | 완료. 검증은 올랐으나 리더보드는 내려감 (9번 참고) |
 | 4 | 2단계에 긴 문장 학습 (검증과 리더보드의 차이 0.23%p를 겨냥) | 미구현 |
 | 5 | test 의사 라벨링 | 규정에서 허용 여부 확인 필요 |
