@@ -1,4 +1,4 @@
-"""2단계 교정 모델의 학습 데이터를 늘린다 (1단계 재학습 없이 예측만 다시 수행).
+"""2단계 교정 모델의 학습 데이터를 늘린다 (1단계 재학습 없이 예측만 수행).
 
 double_stage1.py가 저장한 조각별 1단계 모델로, 그 모델이 학습 때 안 본 조각의 문장을
 '새로 난독화한 입력'으로 다시 예측한다. 같은 정답 문장에서 다른 실수가 나오므로
@@ -6,7 +6,7 @@ double_stage1.py가 저장한 조각별 1단계 모델로, 그 모델이 학습 
 난독화 규칙(Obfuscator)도 조각별로 나머지 조각에서만 추정해, 예측할 조각의 실제 난독화 형태는 쓰지 않는다.
 
 먼저:  python double_stage1.py
-실행:  python double_augment.py --n_variants 3
+실행:  python double_augment.py
 다음:  python double_train.py --extra_oof_path outputs_double/stage1_oof_aug.csv
 
 결과물:
@@ -17,12 +17,11 @@ import os
 
 import torch
 
-from augmented_train import char_f1, set_seed
 from data_augmentation import Obfuscator
 from data_preprocessing import ObfuscationDataset, Vocab, clean, read_csv, write_csv
-from double_stage1 import OOF_FIELDS, ensemble_predict, load_model
-
-AUG_SUFFIX = '_obf'  # 추가 예측문의 ID에 붙는 접미사 (뒤에 번호가 온다)
+from double_data import AUG_SUFFIX
+from double_stage1 import OOF_FIELDS, load_model, predict
+from training import mean_char_f1, set_seed
 
 
 def parse_args():
@@ -31,12 +30,9 @@ def parse_args():
     p.add_argument('--ckpt_dir', default='checkpoints', help='double_stage1.py의 --ckpt_dir')
     p.add_argument('--output_dir', default='outputs_double', help='double_stage1.py의 --output_dir')
     p.add_argument('--n_folds', type=int, default=5)
-    p.add_argument('--n_variants', type=int, default=3, help='문장마다 새로 난독화해 예측하는 횟수')
+    p.add_argument('--n_variants', type=int, default=6, help='문장마다 새로 난독화해 예측하는 횟수')
     p.add_argument('--seed', type=int, default=42)
     p.add_argument('--max_tokens', type=int, default=16384, help='배치당 (문장 수 x 최대 길이) 상한의 절반 (예측은 이 값의 2배를 쓴다)')
-    p.add_argument('--infer_window', type=int, default=0,
-                   help='예측할 때 이보다 긴 문장은 이 길이의 겹치는 구간으로 나눠 넣는다 (0이면 문장 전체를 한 번에)')
-    p.add_argument('--infer_overlap', type=int, default=64, help='구간으로 나눌 때 이웃 구간이 겹치는 문자 수')
     p.add_argument('--no_amp', action='store_true', help='fp16 혼합 정밀도 끄기')
     return p.parse_args()
 
@@ -71,13 +67,12 @@ def main():
         vocab = Vocab.from_state_dict(ckpt['vocab'])
         model = load_model(ckpt, device)
         dataset = ObfuscationDataset(variants, vocab)
-        preds = ensemble_predict([model], dataset, vocab, args, device)
-        f1s = [char_f1(p, t) for p, t in zip(preds, dataset.outputs)]
+        preds = predict(model, dataset, vocab, args, device)
         aug_rows += [
             {'ID': i, 'input': x, 'pred': p, 'output': y}
             for i, x, p, y in zip(dataset.ids, dataset.inputs, preds, dataset.outputs)
         ]
-        print(f'[조각 {k}] 새로 난독화한 문장 {len(variants)}개, char F1 {sum(f1s) / max(len(f1s), 1):.4f}')
+        print(f'[조각 {k}] 새로 난독화한 문장 {len(variants)}개, char F1 {mean_char_f1(preds, dataset.outputs):.4f}')
         del model
 
     aug_path = os.path.join(args.output_dir, 'stage1_oof_aug.csv')

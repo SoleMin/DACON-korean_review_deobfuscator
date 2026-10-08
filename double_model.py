@@ -1,10 +1,14 @@
-"""2단계 교정 모델: 1단계 예측문을 사전학습 KoCharELECTRA로 다시 읽어 틀린 글자를 고친다.
+"""2단계 교정 모델: 1단계 예측문을 댓글로 사전학습된 KcELECTRA로 읽고 글자 단위로 고친다.
 
-- 입력: 1단계 예측문의 문자 임베딩(KoCharELECTRA 사전) + 원래 난독화 글자의 초성/중성/종성 임베딩
-  1단계 예측문은 대부분 정상 한국어라 사전학습 때 보던 글과 같은 형태다.
-  자모 임베딩은 0으로 초기화해 학습 시작 시점에는 사전학습 모델의 입력과 완전히 같고,
-  학습하면서 1단계가 버린 단서(원래 입력의 자모)를 다시 참고하게 된다.
-- 인코더: monologg/kocharelectra-base-discriminator 전체 (문자 단위 토큰, 최대 512 위치)
+1단계 예측문은 대부분 정상 한국어라 사전학습 때 보던 글과 같은 형태다.
+(난독화 문장을 사전학습 모델에 직접 넣으면 처음 보는 글이라 사전학습 지식이 거의 쓰이지 않았다.)
+KcELECTRA는 글자 단위가 아니라 서브워드(WordPiece) 단위 모델이라, 인코더는 예측문을 원래 방식대로
+서브워드로 읽게 하고 그 위에 글자 단위 층을 얹는다.
+
+- 인코더: beomi/KcELECTRA-base-v2022 전체. 입력은 1단계 예측문의 서브워드 토큰
+- 글자 표현: 각 글자가 속한 서브워드 토큰의 출력
+              + 원래 난독화 글자의 자모 임베딩 + 1단계 예측 글자의 자모 임베딩 (model.py의 JamoEmbedding)
+- 글자 단위 층: model.py의 RoPE Transformer 블록 (처음부터 학습). 서브워드 문맥과 글자별 단서를 섞는다
 - 출력: 한글 위치에서만 output 음절 사전으로 분류
   1단계가 예측한 음절의 logit에 copy_bias를 더해, 학습 시작 시점의 출력이 1단계 예측과 같게 한다.
   (맞는 글자를 망치지 않도록 '확신이 있을 때만 바꾸는' 쪽에서 출발)
@@ -14,54 +18,49 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import ElectraConfig, ElectraModel
 
-from data_preprocessing import N_CHO, N_JUNG, N_JONG
+from data_preprocessing import PAD
+from model import EncoderBlock, JamoEmbedding, RotaryEmbedding
 
-MODEL_NAME = 'monologg/kocharelectra-base-discriminator'
-
-
-def load_tokens(model_name=MODEL_NAME):
-    """KoCharELECTRA의 vocab.txt를 토큰 리스트로 읽는다 (줄 번호 = 토큰 id).
-
-    전용 토크나이저(KoCharElectraTokenizer)는 list(text)로 문자를 나눌 뿐이라 사전만 있으면 된다.
-    공백도 하나의 토큰이므로 strip()이 아니라 줄바꿈만 제거해야 한다.
-    """
-    from huggingface_hub import hf_hub_download
-    with open(hf_hub_download(model_name, 'vocab.txt'), encoding='utf-8') as f:
-        return [line.rstrip('\n') for line in f]
+MODEL_NAME = 'beomi/KcELECTRA-base-v2022'
 
 
-class DoubleCorrectionModel(nn.Module):
-    def __init__(self, n_syllables, electra_config=None, model_name=MODEL_NAME, dropout=0.1, copy_bias=5.0):
+class Stage2Model(nn.Module):
+    def __init__(self, n_chars, n_syllables, electra_config=None, model_name=MODEL_NAME,
+                 d_model=384, n_heads=8, n_layers=2, d_ff=1536, dropout=0.1, copy_bias=5.0):
         """electra_config(dict)가 주어지면 사전학습 가중치를 받지 않고 구조만 만든다 (체크포인트 로드용)."""
         super().__init__()
         if electra_config is None:
             self.electra = ElectraModel.from_pretrained(model_name)
         else:
             self.electra = ElectraModel(ElectraConfig.from_dict(electra_config))
-        config = self.electra.config
-        # 인덱스 0: 비한글/특수 토큰/패딩 (자모 없음)
-        self.cho = nn.Embedding(N_CHO + 1, config.embedding_size, padding_idx=0)
-        self.jung = nn.Embedding(N_JUNG + 1, config.embedding_size, padding_idx=0)
-        self.jong = nn.Embedding(N_JONG + 1, config.embedding_size, padding_idx=0)
-        for emb in (self.cho, self.jung, self.jong):
-            nn.init.zeros_(emb.weight)
-        self.dropout = nn.Dropout(dropout)
-        self.head = nn.Linear(config.hidden_size, n_syllables)
+        self.proj = nn.Linear(self.electra.config.hidden_size, d_model)
+        self.obf_embedding = JamoEmbedding(n_chars, d_model, dropout)   # 원래 난독화 글자
+        self.pred_embedding = JamoEmbedding(n_chars, d_model, dropout)  # 1단계 예측 글자
+        self.rotary = RotaryEmbedding(d_model // n_heads)
+        self.layers = nn.ModuleList(EncoderBlock(d_model, n_heads, d_ff, dropout) for _ in range(n_layers))
+        self.final_norm = nn.LayerNorm(d_model)
+        self.head = nn.Linear(d_model, n_syllables)
         self.copy_bias = nn.Parameter(torch.tensor(float(copy_bias)))
 
-    def forward(self, input_ids, jamo, attention_mask, target_mask, copy_ids):
+    def forward(self, input_ids, attention_mask, char2tok, obf, pred, target_mask, copy_ids):
         """target_mask가 True인 위치의 logit만 (N, n_syllables)로 반환.
 
-        input_ids: (B, L) 1단계 예측문의 토큰 id, jamo: (B, L, 3) 난독화 입력의 초성/중성/종성 인덱스,
-        copy_ids: (N,) target 위치에서 1단계가 예측한 음절의 id (출력 사전에 없으면 -1).
+        input_ids, attention_mask: (B, T) 1단계 예측문의 서브워드 토큰
+        char2tok: (B, L) 각 글자가 속한 토큰의 위치. 어느 토큰에도 속하지 않으면(공백, 패딩) 0
+        obf, pred: (B, L, 4) 난독화 글자 / 1단계 예측 글자의 (문자 id, 초성, 중성, 종성)
+        copy_ids: (N,) target 위치에서 1단계가 예측한 음절의 id (출력 사전에 없으면 -1)
         """
-        x = (
-            self.electra.embeddings.word_embeddings(input_ids)
-            + self.cho(jamo[..., 0]) + self.jung(jamo[..., 1]) + self.jong(jamo[..., 2])
-        )
-        # 위치/타입 임베딩, LayerNorm, (크기가 다르면) hidden 차원 투영은 ELECTRA 내부에서 그대로 적용된다
-        h = self.electra(inputs_embeds=x, attention_mask=attention_mask).last_hidden_state
-        logits = self.head(self.dropout(h[target_mask])).float()
+        h = self.electra(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
+        # 글자마다 자기가 속한 토큰의 출력을 가져온다. 토큰이 없는 글자는 0 벡터
+        h = h.gather(1, char2tok[..., None].expand(-1, -1, h.size(-1)))
+        h = self.proj(h) * (char2tok > 0)[..., None]
+        x = h + self.obf_embedding(*obf.unbind(-1)) + self.pred_embedding(*pred.unbind(-1))
+        cos, sin = self.rotary(x.size(1), x.device)
+        # True = attend 가능. (B, 1, 1, L)로 브로드캐스트되어 패딩 key를 가림
+        attn_mask = (obf[..., 0] != PAD)[:, None, None, :]
+        for layer in self.layers:
+            x = layer(x, attn_mask, cos, sin)
+        logits = self.head(self.final_norm(x)[target_mask]).float()
         has_copy = (copy_ids >= 0).float()[:, None]
         copy_onehot = F.one_hot(copy_ids.clamp(min=0), logits.size(-1)).float()
         return logits + copy_onehot * has_copy * self.copy_bias

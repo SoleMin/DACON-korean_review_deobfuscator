@@ -1,4 +1,5 @@
-"""Data augmentation: partial de-obfuscation + word-dict substitution.
+"""Data augmentation for the training split: partial de-obfuscation, word-dict substitution,
+re-obfuscation and concatenation. `augment_rows` applies all of them.
 
 1) Partial de-obfuscation
 Frequent words are poorly learned when every input is fully obfuscated. For a random
@@ -7,7 +8,7 @@ text (2 words up to half of the words in the sentence, at random positions).
 The output stays the same, so the model also learns to copy already-clean words.
 
 2) Word-dict substitution
-word_dict.jsonl maps each original word to every obfuscated form seen in train.
+A word dict maps each original word to every obfuscated form seen in the training split.
 For a random half of the rows, we create a copy where each input word is swapped,
 with probability `threshold` (default 20%), for another obfuscated form of the same
 original word. The output stays the same, so the model sees new obfuscations of it.
@@ -18,14 +19,16 @@ them to the original text, so it can produce obfuscated forms that never appear 
 For a random half of the rows, we create a copy whose input is a fresh obfuscation of
 the output.
 
+4) Concatenation
+Test sentences are much longer than train sentences. Random rows are joined with a space
+into long rows (400~1600 characters by default) to match the length distribution.
+
 Result = all original rows + the augmented copies of all methods.
 """
-import argparse
 import collections
-import json
 import random
 
-from data_preprocessing import HANGUL_START, clean, decompose, is_hangul, read_csv, write_csv
+from data_preprocessing import HANGUL_START, clean, decompose, is_hangul
 
 # jong index -> cho index it becomes when carried over to the next syllable (last consonant of a cluster)
 JONG2CHO = {1: 0, 2: 1, 4: 2, 7: 3, 8: 5, 16: 6, 17: 7, 19: 9, 20: 10, 22: 12, 23: 14,
@@ -114,12 +117,6 @@ class Obfuscator:
         return ''.join(out)
 
 
-def read_word_dict(path):
-    """jsonl -> list of dict: [{'output': original word, 'input': [obfuscated forms]}, ...]"""
-    with open(path, encoding='utf-8') as f:
-        return [json.loads(line) for line in f if line.strip()]
-
-
 def partially_deobfuscate(inp, out, rng):
     in_words, out_words = inp.split(' '), out.split(' ')
     if len(in_words) != len(out_words):  # input/output should be aligned; skip if not
@@ -192,27 +189,40 @@ def concat_rows(rows, n, min_len, max_len, seed):
     return result
 
 
-if __name__ == '__main__':
-    p = argparse.ArgumentParser()
-    p.add_argument('--src', default='data/train.csv')
-    p.add_argument('--dst', default='data/train_aug.csv')  # not train.csv, so the original is never overwritten
-    p.add_argument('--word_dict', default='data/word_dict.jsonl')
-    p.add_argument('--ratio', type=float, default=0.5)  # share of rows that get a partially de-obfuscated copy
-    p.add_argument('--dict_ratio', type=float, default=0.5)  # share of rows that get a dict-substituted copy
-    p.add_argument('--threshold', type=float, default=0.2)  # share of words swapped in a dict-substituted copy
-    p.add_argument('--obf_ratio', type=float, default=0.5)  # share of rows that get a re-obfuscated copy
-    p.add_argument('--seed', type=int, default=42)
-    args = p.parse_args()
 
-    rows = read_csv(args.src)
-    word_dict = read_word_dict(args.word_dict)
+
+def build_word_dict(rows):
+    """Word dict in the format `augment` expects: [{'output': original word, 'input': [obfuscated forms]}, ...]"""
+    variants = collections.defaultdict(set)
+    for row in rows:
+        in_words, out_words = row['input'].split(' '), clean(row['output']).split(' ')
+        if len(in_words) != len(out_words):
+            continue
+        for in_word, out_word in zip(in_words, out_words):
+            variants[out_word].add(in_word)
+    return [{'output': out_word, 'input': sorted(in_words)} for out_word, in_words in variants.items()]
+
+
+def augment_rows(rows, args):
+    """Return rows + augmented copies. Pass the training split only.
+
+    The word dict and the obfuscation rules are built from `rows` alone, so nothing from validation rows leaks in.
+    The three per-row methods run `aug_times` times with different seeds; long concatenated rows are added last.
+    """
+    word_dict = build_word_dict(rows)
+    # the obfuscator returns a different result on every call, so one instance serves all rounds
     obfuscator = Obfuscator.from_rows(rows, args.seed) if args.obf_ratio > 0 else None
-    aug = augment(rows, args.ratio, args.seed, word_dict, args.dict_ratio, args.threshold, obfuscator, args.obf_ratio)
-    write_csv(args.dst, [{'ID': r['ID'], 'input': r['input'], 'output': clean(r['output'])} for r in rows] + aug,
-              ['ID', 'input', 'output'])
-    n_dict = sum(r['ID'].endswith('_dict') for r in aug)
-    n_obf = sum(r['ID'].endswith('_obf') for r in aug)
-    print(
-        f'{len(rows)} original + {len(aug) - n_dict - n_obf} de-obfuscated + {n_dict} dict-substituted'
-        f' + {n_obf} re-obfuscated -> {args.dst}'
-    )
+    seen = {(row['input'], clean(row['output'])) for row in rows}
+    aug_rows = []
+    for i in range(args.aug_times):
+        for row in augment(rows, args.aug_ratio, args.seed + i, word_dict, args.dict_ratio, args.threshold,
+                           obfuscator, args.obf_ratio):
+            key = (row['input'], row['output'])
+            if key in seen:  # identical to an original row or to a copy from an earlier round
+                continue
+            seen.add(key)
+            aug_rows.append({**row, 'ID': f"{row['ID']}_{i}"})
+    rows = rows + aug_rows
+    # test sentences are much longer than train sentences, so add long rows to match the length distribution
+    n_concat = int(len(rows) * args.concat_ratio)
+    return rows + concat_rows(rows, n_concat, args.concat_min_len, args.concat_max_len, args.seed)
