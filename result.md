@@ -171,16 +171,16 @@ stage1_test.csv ─────────────────────�
 
 ```bash
 # 1) 1단계 5조각 학습 + train/test 예측문 생성
-python double_stage1.py --seed 44
+python stage1_train.py --seed 44
 
 # 2) 추가 예측문 생성 (예측만 수행)
-python double_augment.py
+python stage1_predict_aug.py
 
 # 3) 2단계 교정 모델 학습
-python double_train.py --seed 44 --extra_oof_path outputs_double/stage1_oof_aug.csv
+python stage2_train.py --seed 44 --extra_oof_path outputs/stage1_oof_aug.csv
 
-# 4) 교정 반복 적용 -> 최종 제출 파일 (outputs_double_final/submission.csv)
-python double_ensemble.py --ckpt_paths checkpoints/double_stage2.pt
+# 4) 교정 반복 적용 -> 최종 제출 파일 (outputs/submission.csv)
+python predict.py --ckpt_paths outputs/stage2.pt
 ```
 
 - 기본값이 실험에 쓴 설정이다 (1단계: 하위 6층 + 사전학습 6층, dropout 0.15, `aug_times 2`. 추가 예측문: `n_variants 6`).
@@ -194,26 +194,32 @@ python double_ensemble.py --ckpt_paths checkpoints/double_stage2.pt
 
 | 파일 | 역할 |
 |---|---|
-| `data_preprocessing.py` | CSV 입출력, 자모 분해, 사전, 데이터셋, 토큰 예산 배치 |
-| `data_augmentation.py` | 증강: 부분 복원, 단어 사전 치환, 재난독화(`Obfuscator`), 이어 붙이기 |
-| `training.py` | 공용 학습 루프(warmup + cosine, fp16, EMA, 조기 종료), seed, 문자 F1 |
-| `model.py` | 1단계 복원 모델 (자모 임베딩 + RoPE Transformer + KoCharELECTRA-small 상위 층) |
-| `double_stage1.py` | 1단계 5조각 학습, train/test 예측문 생성 |
-| `double_augment.py` | 조각별 1단계 모델로 추가 예측문 생성 |
-| `double_data.py` | 2단계 데이터셋 (구간 나누기, 가리기/오답으로 바꾸기, 서브워드-글자 대응) |
-| `double_model.py` | 2단계 교정 모델 (KcELECTRA + 글자 단위 층) |
-| `double_train.py` | 2단계 학습/평가/추론 |
-| `double_ensemble.py` | 교정 반복 적용과 2단계 모델 앙상블, 최종 제출 파일 생성 |
+| `preprocessing.py` | CSV 입출력, 자모 분해, 사전, 데이터셋, 토큰 예산 배치 |
+| `augmentation.py` | 증강: 부분 복원, 단어 사전 치환, 재난독화(`Obfuscator`), 이어 붙이기 |
+| `trainer.py` | 공용 학습 루프(warmup + cosine, fp16, EMA, 조기 종료), seed, 문자 F1 |
+| `stage1_model.py` | 1단계 복원 모델 (자모 임베딩 + RoPE Transformer + KoCharELECTRA-small 상위 층) |
+| `stage1_train.py` | 1단계 5조각 학습, train/test 예측문 생성 |
+| `stage1_predict_aug.py` | 조각별 1단계 모델로 추가 예측문 생성 |
+| `stage2_data.py` | 2단계 데이터셋 (구간 나누기, 가리기/오답으로 바꾸기, 서브워드-글자 대응) |
+| `stage2_model.py` | 2단계 교정 모델 (KcELECTRA + 글자 단위 층) |
+| `stage2_train.py` | 2단계 학습/평가/추론 |
+| `predict.py` | 교정 반복 적용과 2단계 모델 앙상블, 최종 제출 파일 생성 |
 
 이 문서의 3~6번과 9번에는 정리 전의 스크립트 이름이 나온다. 지금 코드와의 대응은 다음과 같다.
 
 | 문서에 나오는 이름 | 지금 |
 |---|---|
-| `pretrain_model.py` (하이브리드 모델) | `model.py`의 `Stage1Model` |
-| `double_kc_model.py`, `double_kc_train.py` | `double_model.py`, `double_train.py` |
-| `double_mask_train.py`, `double_seed_train.py` | `double_train.py`의 가리기 옵션과 `--model_seed` |
+| `model.py`, `pretrain_model.py` (하이브리드 모델) | `stage1_model.py`의 `Stage1Model` |
+| `double_stage1.py`, `double_augment.py` | `stage1_train.py`, `stage1_predict_aug.py` |
+| `double_kc_model.py`, `double_kc_train.py` | `stage2_model.py`, `stage2_train.py` |
+| `double_ensemble.py` | `predict.py` |
+| `data_preprocessing.py`, `data_augmentation.py` | `preprocessing.py`, `augmentation.py` |
+| `double_mask_train.py`, `double_seed_train.py` | `stage2_train.py`의 가리기 옵션과 `--model_seed` |
 | `train.py`, `augmented_train.py`, `pretrain_train.py` | 삭제 (단독 학습 스크립트) |
 | KoCharELECTRA 2단계 모델, `double_mask_stage1.py` | 삭제 |
+
+출력 경로도 바뀌었다. 문서의 `checkpoints/double_stage1_fold{k}.pt`, `outputs_double/...`는 지금 모두 `outputs/` 아래에 만들어진다
+(`outputs/stage1_fold{k}.pt`, `outputs/stage2.pt`, `outputs/stage1_oof.csv` 등).
 
 ## 9. 여기까지 오는 과정
 
