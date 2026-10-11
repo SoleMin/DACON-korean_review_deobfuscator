@@ -1,10 +1,5 @@
-/checkpoints*/
 /data/
-/outputs*/
+/outputs/
 /__pycache__/
-/colab.ipynb
-/stage2_ensembe*.ipynb
-/test.ipynb
-/colab_args.txt
-/explain.md
-/prompt.md
+
+
