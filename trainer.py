@@ -6,7 +6,7 @@ import time
 import torch
 import torch.nn.functional as F
 
-from data_preprocessing import IGNORE_INDEX
+from preprocessing import IGNORE_INDEX
 
 
 def set_seed(seed):

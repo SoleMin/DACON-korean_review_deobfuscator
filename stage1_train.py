@@ -1,21 +1,21 @@
 """1단계: 복원 모델을 K-fold로 학습해 '처음 보는 문장에 대한 예측문'을 만든다.
 
-2단계 교정 모델(double_train.py)은 1단계 모델이 실제로 저지르는 실수를 보고 배워야 한다.
+2단계 교정 모델(stage2_train.py)은 1단계 모델이 실제로 저지르는 실수를 보고 배워야 한다.
 그런데 1단계 모델은 자기가 학습한 문장은 거의 다 맞히므로, train을 n_folds 조각으로 나눠
 (나머지 조각으로 학습 -> 안 본 조각을 예측)을 조각마다 반복해 train 전체의 예측문을 모은다.
 test는 조각별 모델들의 확률을 평균해(앙상블) 예측한다.
 
-증강은 조각별 학습 데이터에만 적용한다 (data_augmentation.augment_rows).
+증강은 조각별 학습 데이터에만 적용한다 (augmentation.augment_rows).
 조각 하나가 끝날 때마다 결과를 파일로 남기므로, 중간에 끊겨도 다시 실행하면 끝난 조각은 건너뛴다.
 
-실행:  python double_stage1.py
+실행:  python stage1_train.py
 
 결과물:
-- checkpoints/double_stage1_fold{k}.pt     조각 k를 빼고 학습한 1단계 모델
-- outputs_double/stage1_oof_fold{k}.csv    조각 k의 예측문 (ID, input, pred, output)
-- outputs_double/stage1_oof.csv            train 전체의 예측문 (2단계 학습 데이터)
-- outputs_double/stage1_test.csv           test 예측문 (ID, input, pred) (2단계 추론 입력)
-- outputs_double/stage1_submission.csv     1단계 앙상블만으로 만든 제출 파일 (2단계와 비교용)
+- outputs/stage1_fold{k}.pt          조각 k를 빼고 학습한 1단계 모델
+- outputs/stage1_oof_fold{k}.csv    조각 k의 예측문 (ID, input, pred, output)
+- outputs/stage1_oof.csv            train 전체의 예측문 (2단계 학습 데이터)
+- outputs/stage1_test.csv           test 예측문 (ID, input, pred) (2단계 추론 입력)
+- outputs/stage1_submission.csv     1단계 앙상블만으로 만든 제출 파일 (2단계와 비교용)
 """
 import argparse
 import os
@@ -24,12 +24,12 @@ import random
 import torch
 from torch.utils.data import DataLoader
 
-from data_augmentation import augment_rows
-from data_preprocessing import (
+from augmentation import augment_rows
+from preprocessing import (
     ObfuscationDataset, TokenBudgetSampler, Vocab, clean, collate_fn, read_csv, split_rows, write_csv,
 )
-from model import MODEL_NAME, Stage1Model
-from training import fit, mean_char_f1, set_seed, to_device
+from stage1_model import MODEL_NAME, Stage1Model
+from trainer import fit, mean_char_f1, set_seed, to_device
 
 OOF_FIELDS = ['ID', 'input', 'pred', 'output']
 
@@ -38,8 +38,7 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument('--train_path', default='data/train.csv')
     p.add_argument('--test_path', default='data/test.csv')
-    p.add_argument('--ckpt_dir', default='checkpoints')
-    p.add_argument('--output_dir', default='outputs_double')
+    p.add_argument('--output_dir', default='outputs')
     p.add_argument('--n_folds', type=int, default=5)
     p.add_argument('--valid_ratio', type=float, default=0.03,
                    help='조각별 학습 데이터에서 조기 종료용으로 떼어 두는 비율 (예측할 조각과는 별개)')
@@ -179,7 +178,6 @@ def main():
     set_seed(args.seed)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'device: {device}')
-    os.makedirs(args.ckpt_dir, exist_ok=True)
     os.makedirs(args.output_dir, exist_ok=True)
 
     rows = read_csv(args.train_path)
@@ -190,7 +188,7 @@ def main():
     random.Random(args.seed).shuffle(order)
     fold_of = {rows[i]['ID']: rank % args.n_folds for rank, i in enumerate(order)}
 
-    ckpt_paths = [os.path.join(args.ckpt_dir, f'double_stage1_fold{k}.pt') for k in range(args.n_folds)]
+    ckpt_paths = [os.path.join(args.output_dir, f'stage1_fold{k}.pt') for k in range(args.n_folds)]
     oof_paths = [os.path.join(args.output_dir, f'stage1_oof_fold{k}.csv') for k in range(args.n_folds)]
     for k in range(args.n_folds):
         if os.path.exists(oof_paths[k]) and os.path.exists(ckpt_paths[k]):

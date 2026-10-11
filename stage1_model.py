@@ -7,14 +7,14 @@
 - 출력: 한글 위치에서만 output 음절 사전(약 1.4천 개)으로 분류
   (비한글 위치는 항상 그대로 복사되므로 logit을 계산하지 않아 연산을 줄임)
 
-JamoEmbedding, RotaryEmbedding, EncoderBlock은 2단계 교정 모델(double_model.py)도 함께 쓴다.
+JamoEmbedding, RotaryEmbedding, EncoderBlock은 2단계 교정 모델(stage2_model.py)도 함께 쓴다.
 """
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import ElectraConfig, ElectraModel
 
-from data_preprocessing import N_CHO, N_JUNG, N_JONG, PAD
+from preprocessing import N_CHO, N_JUNG, N_JONG, PAD
 
 MODEL_NAME = 'monologg/kocharelectra-small-discriminator'
 

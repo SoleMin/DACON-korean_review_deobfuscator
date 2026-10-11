@@ -1,23 +1,24 @@
 """2단계: 교정 모델 학습 / 평가 / 추론.
 
-double_stage1.py가 만든 1단계 예측문을 입력으로, 틀린 글자를 고치는 교정 모델(double_model.py)을 학습한다.
+stage1_train.py가 만든 1단계 예측문을 입력으로, 틀린 글자를 고치는 교정 모델(stage2_model.py)을 학습한다.
 학습 데이터는 stage1_oof.csv(1단계가 처음 보는 문장을 예측한 결과)라, 검증/test에서 나오는 것과 같은 성격의 실수가 담겨 있다.
-학습 입력에는 가리기와 오답으로 바꾸기를 적용한다 (double_data.Stage2Dataset).
+학습 입력에는 가리기와 오답으로 바꾸기를 적용한다 (stage2_data.Stage2Dataset).
 
 기본값은 A100 기준이다. 메모리가 작은 GPU에서는 --max_tokens 8192 --lr 1e-4 --ema_decay 0.99 정도로 낮춘다.
 
-먼저:      python double_stage1.py && python double_augment.py
-학습:      python double_train.py --extra_oof_path outputs_double/stage1_oof_aug.csv
-평가만:    python double_train.py --eval_only
-앙상블용:  python double_train.py --model_seed 1 --ckpt_path checkpoints/double_stage2_s1.pt --output_dir outputs_double_s1 ...
+먼저:      python stage1_train.py && python stage1_predict_aug.py
+학습:      python stage2_train.py --extra_oof_path outputs/stage1_oof_aug.csv
+평가만:    python stage2_train.py --eval_only
+앙상블용:  python stage2_train.py --model_seed 1 --ckpt_path outputs/stage2_s1.pt ...
            (--seed는 검증 분할을 정하므로 그대로 두고, 모델 쪽 난수만 --model_seed로 바꾼다)
 
 결과물:
-- checkpoints/double_stage2.pt             검증 F1이 가장 높은 교정 모델
-- outputs_double/val_predictions.csv       검증셋 ID, 1단계 F1, 2단계 F1, input, 1단계 예측, 정답, 2단계 예측 (F1 낮은 순)
-- outputs_double/submission.csv            test 예측 (sample_submission 형식)
+- outputs/stage2.pt                     검증 F1이 가장 높은 교정 모델
+- outputs/stage2_val_predictions.csv    검증셋 ID, 1단계 F1, 2단계 F1, input, 1단계 예측, 정답, 2단계 예측 (F1 낮은 순)
+- outputs/stage2_submission.csv         test 예측 (sample_submission 형식). 반복 적용 전의 결과다
+(결과 파일은 체크포인트 옆에 '체크포인트 이름_...' 으로 저장한다)
 
-교정을 반복 적용하거나 여러 모델을 앙상블한 제출 파일은 double_ensemble.py로 만든다.
+교정을 반복 적용하거나 여러 모델을 앙상블한 제출 파일은 predict.py로 만든다.
 """
 import argparse
 import os
@@ -26,20 +27,19 @@ import torch
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
-from data_preprocessing import TokenBudgetSampler, Vocab, is_hangul, read_csv, split_rows, write_csv
-from double_data import AUG_SUFFIX, Stage2Dataset, collate_fn, model_inputs, target_positions
-from double_model import MODEL_NAME, Stage2Model
-from training import char_f1, fit, mean_char_f1, set_seed, to_device
+from preprocessing import TokenBudgetSampler, Vocab, is_hangul, read_csv, split_rows, write_csv
+from stage2_data import AUG_SUFFIX, Stage2Dataset, collate_fn, model_inputs, target_positions
+from stage2_model import MODEL_NAME, Stage2Model
+from trainer import char_f1, fit, mean_char_f1, set_seed, to_device
 
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument('--oof_path', default='outputs_double/stage1_oof.csv', help='1단계의 train 예측문 (ID, input, pred, output)')
+    p.add_argument('--oof_path', default='outputs/stage1_oof.csv', help='1단계의 train 예측문 (ID, input, pred, output)')
     p.add_argument('--extra_oof_path', default=None,
-                   help='double_augment.py가 만든 추가 예측문. 지정하면 학습셋에만 더한다 (검증 문장에서 나온 것은 제외)')
-    p.add_argument('--stage1_test_path', default='outputs_double/stage1_test.csv', help='1단계의 test 예측문 (ID, input, pred)')
-    p.add_argument('--ckpt_path', default='checkpoints/double_stage2.pt')
-    p.add_argument('--output_dir', default='outputs_double')
+                   help='stage1_predict_aug.py가 만든 추가 예측문. 지정하면 학습셋에만 더한다 (검증 문장에서 나온 것은 제외)')
+    p.add_argument('--stage1_test_path', default='outputs/stage1_test.csv', help='1단계의 test 예측문 (ID, input, pred)')
+    p.add_argument('--ckpt_path', default='outputs/stage2.pt')
     p.add_argument('--valid_ratio', type=float, default=0.1)
     p.add_argument('--seed', type=int, default=42, help='검증 분할과 배치 순서를 정한다. 앙상블할 모델들은 같은 값을 써야 한다')
     p.add_argument('--model_seed', type=int, default=None,
@@ -218,7 +218,7 @@ def load_checkpoint(path, device):
 def evaluate_and_export(args, device):
     model, vocab, tokenizer, ckpt = load_checkpoint(args.ckpt_path, device)
     print(f"체크포인트 로드: epoch {ckpt['epoch']}, valid F1 {ckpt['valid_f1']:.4f}")
-    os.makedirs(args.output_dir, exist_ok=True)
+    prefix = os.path.splitext(args.ckpt_path)[0]  # 결과 파일은 체크포인트 옆에 같은 이름으로 둔다
 
     # 검증셋 평가 결과 (학습 때 저장해 둔 검증 문장만 사용)
     valid_ids = set(ckpt['valid_ids'])
@@ -241,7 +241,7 @@ def evaluate_and_export(args, device):
         for i, x, s, y, p in zip(valid_set.ids, valid_set.inputs, valid_set.stage1, valid_set.outputs, preds)
     ]
     result.sort(key=lambda r: r['f1'])  # 틀린 문장부터 보이도록
-    valid_path = os.path.join(args.output_dir, 'val_predictions.csv')
+    valid_path = f'{prefix}_val_predictions.csv'
     write_csv(valid_path, result, ['ID', 'f1_stage1', 'f1', 'input', 'stage1', 'output', 'pred'])
     print(
         f'valid char F1: 교정 전 {mean_char_f1(valid_set.stage1, valid_set.outputs):.4f}'
@@ -254,7 +254,7 @@ def evaluate_and_export(args, device):
     test_set = Stage2Dataset(read_csv(args.stage1_test_path), vocab, tokenizer, args, with_label=False)
     test_preds = predict(model, test_set, vocab, args, device, margin)
     n_changed = sum(p != s for p, s in zip(test_preds, test_set.stage1))
-    submission_path = os.path.join(args.output_dir, 'submission.csv')
+    submission_path = f'{prefix}_submission.csv'
     write_csv(submission_path, [{'ID': i, 'output': p} for i, p in zip(test_set.ids, test_preds)], ['ID', 'output'])
     print(f'test 예측 {len(test_preds)}개 (1단계 예측에서 바뀐 문장 {n_changed}개) -> {submission_path}')
 

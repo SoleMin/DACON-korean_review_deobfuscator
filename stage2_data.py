@@ -10,9 +10,9 @@ import torch
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset
 
-from data_preprocessing import IGNORE_INDEX, UNK, clean, is_hangul
+from preprocessing import IGNORE_INDEX, UNK, clean, is_hangul
 
-AUG_SUFFIX = '_obf'  # double_augment.py가 추가 예측문의 ID에 붙이는 접미사 (뒤에 번호가 온다)
+AUG_SUFFIX = '_obf'  # stage1_predict_aug.py가 추가 예측문의 ID에 붙이는 접미사 (뒤에 번호가 온다)
 
 # 글자 단위 텐서의 패딩 값. 'obf'의 문자 id가 0(PAD)인 위치가 패딩이다
 PADDING = {'obf': 0, 'pred': 0, 'char2tok': 0, 'copy_ids': -1, 'keep': False, 'labels': IGNORE_INDEX}

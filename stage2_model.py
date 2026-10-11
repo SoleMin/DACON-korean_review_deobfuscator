@@ -7,8 +7,8 @@ KcELECTRA는 글자 단위가 아니라 서브워드(WordPiece) 단위 모델이
 
 - 인코더: beomi/KcELECTRA-base-v2022 전체. 입력은 1단계 예측문의 서브워드 토큰
 - 글자 표현: 각 글자가 속한 서브워드 토큰의 출력
-              + 원래 난독화 글자의 자모 임베딩 + 1단계 예측 글자의 자모 임베딩 (model.py의 JamoEmbedding)
-- 글자 단위 층: model.py의 RoPE Transformer 블록 (처음부터 학습). 서브워드 문맥과 글자별 단서를 섞는다
+              + 원래 난독화 글자의 자모 임베딩 + 1단계 예측 글자의 자모 임베딩 (stage1_model.py의 JamoEmbedding)
+- 글자 단위 층: stage1_model.py의 RoPE Transformer 블록 (처음부터 학습). 서브워드 문맥과 글자별 단서를 섞는다
 - 출력: 한글 위치에서만 output 음절 사전으로 분류
   1단계가 예측한 음절의 logit에 copy_bias를 더해, 학습 시작 시점의 출력이 1단계 예측과 같게 한다.
   (맞는 글자를 망치지 않도록 '확신이 있을 때만 바꾸는' 쪽에서 출발)
@@ -18,8 +18,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import ElectraConfig, ElectraModel
 
-from data_preprocessing import PAD
-from model import EncoderBlock, JamoEmbedding, RotaryEmbedding
+from preprocessing import PAD
+from stage1_model import EncoderBlock, JamoEmbedding, RotaryEmbedding
 
 MODEL_NAME = 'beomi/KcELECTRA-base-v2022'
 

@@ -5,15 +5,15 @@
   검증 F1이 가장 높은 횟수를 골라 test에도 같은 횟수를 적용한다.
 - 앙상블: 2단계 체크포인트를 여러 개 주면 확률을 글자마다 (가중) 평균한다.
   모두 같은 검증 문장과 같은 학습 데이터로 학습한 것이어야 한다
-  (double_train.py에서 --seed는 같게 두고 --model_seed만 바꿔 학습한다).
+  (stage2_train.py에서 --seed는 같게 두고 --model_seed만 바꿔 학습한다).
 - copy_margin: 지정하지 않으면 margin_sweep 중 검증 F1(1회 적용 기준)이 가장 높은 값을 쓴다.
 
-실행:  python double_ensemble.py --ckpt_paths checkpoints/double_stage2.pt
-       python double_ensemble.py --ckpt_paths checkpoints/double_stage2.pt checkpoints/double_stage2_s1.pt
+실행:  python predict.py --ckpt_paths outputs/stage2.pt
+       python predict.py --ckpt_paths outputs/stage2.pt outputs/stage2_s1.pt
 
 결과물:
-- outputs_double_final/val_predictions.csv   검증셋 ID, 1단계 F1, 최종 F1, input, 1단계 예측, 정답, 최종 예측 (F1 낮은 순)
-- outputs_double_final/submission.csv        test 예측 (sample_submission 형식)
+- outputs/val_predictions.csv   검증셋 ID, 1단계 F1, 최종 F1, input, 1단계 예측, 정답, 최종 예측 (F1 낮은 순)
+- outputs/submission.csv        test 예측 (sample_submission 형식)
 """
 import argparse
 import os
@@ -21,10 +21,10 @@ import os
 import torch
 from torch.utils.data import DataLoader
 
-from data_preprocessing import TokenBudgetSampler, clean, is_hangul, read_csv, write_csv
-from double_data import Stage2Dataset, collate_fn, model_inputs, target_positions
-from double_train import count_changes, load_checkpoint
-from training import char_f1, mean_char_f1, to_device
+from preprocessing import TokenBudgetSampler, clean, is_hangul, read_csv, write_csv
+from stage2_data import Stage2Dataset, collate_fn, model_inputs, target_positions
+from stage2_train import count_changes, load_checkpoint
+from trainer import char_f1, mean_char_f1, to_device
 
 
 def parse_args():
@@ -32,9 +32,9 @@ def parse_args():
     p.add_argument('--ckpt_paths', nargs='+', required=True, help='2단계 체크포인트들 (공백으로 구분)')
     p.add_argument('--weights', type=float, nargs='+', default=None,
                    help='체크포인트별 가중치 (ckpt_paths와 같은 순서, 같은 개수). 지정하지 않으면 모두 1')
-    p.add_argument('--oof_path', default='outputs_double/stage1_oof.csv', help='1단계의 train 예측문 (ID, input, pred, output)')
-    p.add_argument('--stage1_test_path', default='outputs_double/stage1_test.csv', help='1단계의 test 예측문 (ID, input, pred)')
-    p.add_argument('--output_dir', default='outputs_double_final')
+    p.add_argument('--oof_path', default='outputs/stage1_oof.csv', help='1단계의 train 예측문 (ID, input, pred, output)')
+    p.add_argument('--stage1_test_path', default='outputs/stage1_test.csv', help='1단계의 test 예측문 (ID, input, pred)')
+    p.add_argument('--output_dir', default='outputs')
     p.add_argument('--n_passes', type=int, default=3, help='교정을 반복 적용해 볼 최대 횟수 (1이면 한 번만)')
     p.add_argument('--copy_margin', type=float, default=None,
                    help='1단계(또는 앞 회차) 음절의 logit에 더하는 값. 지정하지 않으면 margin_sweep 중 검증 F1이 가장 높은 값')
